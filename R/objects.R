@@ -1,71 +1,72 @@
-#' @title An omics network object
-#'
+#' @title Omics Network Object
 #' @import R6
 #' @import igraph
 #' @import dplyr
 #' @import magrittr
 #' 
 #' @export
-network <- R6::R6Class("network",
-    private = list(
-        edge.fn = NULL,
-        node.fn = NULL
-    ),
+omics.network <- R6::R6Class("omics.network",
     public = list(
         ig = NULL,
         initialize = function(ig, 
-                              node.fn=node.properties(),
-                              edge.fn=edge.properties()
+                              node.fn=list(),
+                              edge.fn=list()
                               ) {
             self$ig <- ig
+            
             igraph::E(self$ig)$name <- igraph::as_ids(igraph::E(self$ig))
             df <- igraph::as_data_frame(self$ig, what="edges")
             if (ncol(df) == 0) {
                 igraph::E(self$ig)$from <- df$from
                 igraph::E(self$ig)$to <- df$to
             }
+            
             private$node.fn <- node.fn
             private$edge.fn <- edge.fn
+            self$graph.update()
         },
         peek = function(...) {
             cat("Omics Network Object\n")
             print(self$ig)
             invisible(self)
         },
-        node = function(attr) {
+        nodes = function(attr) {
             if (attr %not_in% igraph::vertex_attr_names(self$ig)) {
                 stop("Available node attributes: ", paste(igraph::vertex_attr_names(self$ig), collapse=","))
             }
             return(igraph::get.vertex.attribute(self$ig, attr))
         },
-        node.annotate = function(values, attr) {
+        nodes.map = function(ids, attr_1, attr_2) {
+            self$nodes(attr_2)[match(ids, self$nodes(attr_1))]
+        },
+        nodes.annotate = function(values, attr) {
             self$ig <- igraph::set_vertex_attr(graph=self$ig, name=attr, value=values)
         },
-        node.attributes = function() {
+        nodes.attributes = function() {
             igraph::as_data_frame(self$ig, what="vertices")
         },
-        node.filter = function(conditions, attr="name") {
+        nodes.filter = function(conditions, attr="name") {
             v <- rlang::parse_exprs(conditions)
-            self$node.attributes() %>%
+            self$nodes.attributes() %>%
                 dplyr::filter(!!!v) %>%
                 dplyr::pull({{attr}})
         },
-        node.recompute = function() {
+        nodes.update = function() {
             node.attr <- mapply(function(fn) {
                 fn(self$ig)
             }, private$node.fn, SIMPLIFY=FALSE, USE.NAMES=TRUE)
             for (attr in names(node.attr)) {
-                self$node.annotate(node.attr[[attr]], attr)
+                self$nodes.annotate(node.attr[[attr]], attr)
             }
         },
-        node.neighbors = function(ids, attr="name", degree=1, neighbors.only=TRUE, return.names=FALSE) {
+        nodes.neighbors = function(ids, attr="name", degree=1, neighbors.only=TRUE, return.names=FALSE) {
             stopifnot(attr %in% igraph::vertex_attr_names(self$ig))
             stopifnot(degree >= 1)
-            v <- self$node("name")[match(ids, self$node(attr))]
+            v <- self$nodes.map(ids, attr, "name")
             v.names <- v
             for (i in seq_len(degree)) {
                 v.id <- unique(unlist(igraph::adjacent_vertices(self$ig, v.names, mode="all")))
-                v.adjacent <-  self$node("name")[v.id]
+                v.adjacent <-  self$nodes("name")[v.id]
                 v.names <- unique(c(v.names, v.adjacent))
             }
             if (neighbors.only) {
@@ -74,76 +75,90 @@ network <- R6::R6Class("network",
             if (return.names) {
                 return(v.names)
             } else {
-                return(self$node(attr)[match(v.names, self$node("name"))])
+                return(self$nodes.map(v.names, "name", attr))
             }
         },
-        edge = function(attr) {
+        edges = function(attr) {
             if (attr %not_in% igraph::edge_attr_names(self$ig)) {
                 stop("Available edge attributes: ", paste(igraph::edge_attr_names(self$ig), collapse=","))
             }
             return(igraph::get.edge.attribute(self$ig, attr))
         },
-        edge.annotate = function(values, attr) {
+        edges.map = function(ids, attr_1, attr_2) {
+            self$edges(attr_2)[match(ids, self$edges(attr_1))]
+        },
+        edges.annotate = function(values, attr) {
             self$ig <- igraph::set_edge_attr(graph=self$ig, name=attr, value=values)
         },
-        edge.attributes = function() {
+        edges.attributes = function() {
             igraph::as_data_frame(self$ig, what="edges") %>%
             dplyr::relocate(name, from, to)  
         },
-        edge.filter = function(conditions, attr="name") {
+        edges.filter = function(conditions, attr="name") {
             v <- rlang::parse_exprs(conditions)
-            self$edge.attributes() %>%
+            self$edges.attributes() %>%
                 dplyr::filter(!!!v) %>%
                 dplyr::pull({{attr}})
         },
-        edge.recompute = function() {
+        edges.update = function() {
             edge.attr <- mapply(function(fn) {
                 fn(self$ig)
             }, private$edge.fn, SIMPLIFY=FALSE, USE.NAMES=TRUE)
             for (attr in names(edge.attr)) {
-                self$edge.annotate(edge.attr[[attr]], attr)
+                self$edges.annotate(edge.attr[[attr]], attr)
             }
         },
-        graph.recompute = function() {
-            self$node.recompute()
-            self$edge.recompute()
+        graph.update = function() {
+            self$nodes.update()
+            self$edges.update()
         },
-        graph.simplify = function(recompute=TRUE, remove.multiple=TRUE, remove.loops=TRUE) {
+        graph.on.change = function(update) {
+            if (update) {
+                self$graph.update()
+            }
+        },
+        graph.delete.nodes = function(ids, attr="name", update=TRUE) {
+            v.names <- self$nodes.map(ids, attr, "name")
+            ig.c <- self$clone()
+            ig.c$ig <- igraph::delete_vertices(ig.c$ig, v.names)
+            ig.c$graph.on.change(update)
+            return(ig.c)
+        },
+        graph.delete.edges = function(ids, attr="name", update=TRUE) {
+            e.names <- self$edges.map(ids, attr, "name")
+            ig.c <- self$clone()
+            ig.c$ig <- igraph::delete_edges(ig.c$ig, e.names)
+            ig.c$graph.on.change(update)
+            return(ig.c)
+        },
+        graph.simplify = function(remove.multiple=TRUE, remove.loops=TRUE, update=TRUE) {
             ig.c <- self$clone()
             ig.c$ig <- igraph::simplify(ig.c$ig, remove.multiple=remove.multiple, remove.loops=remove.loops)
-            if (recompute) {
-                ig.c$graph.recompute()
-            }
+            ig.c$graph.on.change(update)
             return(ig.c)
         },
-        graph.delete.isolates = function(recompute=TRUE) {
+        graph.delete.isolates = function(update=TRUE) {
             ig.c <- self$clone()
             ig.c$ig <- igraph::delete_vertices(ig.c$ig, which(igraph::degree(ig.c$ig) == 0))
-            if (recompute) {
-                ig.c$graph.recompute()
-            }
+            ig.c$graph.on.change(update)
             return(ig.c)
         },
-        graph.subset.nodes = function(ids, attr="name", degree=0, recompute=TRUE) {
+        graph.subset.nodes = function(ids, attr="name", degree=0, update=TRUE) {
             stopifnot(degree >= 0)
             if (degree == 0) {
-                v.names <- self$node("name")[match(ids, self$node(attr))]
+                v.names <- self$nodes.map(ids, attr, "name")
             } else {
-                v.names <- self$node.neighbors(ids, attr, degree, neighbors.only=FALSE, return.names=TRUE)   
+                v.names <- self$nodes.neighbors(ids, attr, degree, neighbors.only=FALSE, return.names=TRUE)   
             }
             ig.c <- self$clone()
             ig.c$ig <- igraph::induced_subgraph(ig.c$ig, v.names)
-            if (recompute) {
-                ig.c$graph.recompute()
-            }
+            ig.c$graph.on.change(update)
             return(ig.c)
         },
-        graph.subset.edges = function(ids, recompute=TRUE) {
+        graph.subset.edges = function(ids, update=TRUE) {
             ig.c <- self$clone()
             ig.c$ig <- igraph::subgraph.edges(ig.c$ig, ids)
-            if (recompute) {
-                ig.c$graph.recompute()
-            }
+            ig.c$graph.on.change(update)
             return(ig.c)
         },
         plot = function(vertex.size=4,
@@ -158,10 +173,11 @@ network <- R6::R6Class("network",
                         edge.width=1,
                         edge.color="#3D3D3D",
                         edge.arrow.size=0.2,
+                        no.margin=TRUE,
                         layout=NULL, 
                         seed=1,
                         ...) {
-            
+                        
             if (is.null(layout)) {
                 set.seed(seed)
                 layout <- igraph::layout_with_graphopt(self$ig, 
@@ -173,6 +189,10 @@ network <- R6::R6Class("network",
                                                        spring.constant=1, 
                                                        max.sa.movement=5)
             }
+            if (no.margin) {
+                par(mar=c(0,0,0,0))
+            }
+            set.seed(seed)
             plot(self$ig,
                  vertex.size=vertex.size,
                  vertex.color=vertex.color,
@@ -188,5 +208,9 @@ network <- R6::R6Class("network",
                  layout=layout,
                  ...)
         }
+    ),
+    private = list(
+        edge.fn = NULL,
+        node.fn = NULL
     )
 )

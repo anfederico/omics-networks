@@ -1,0 +1,240 @@
+---
+output: rmarkdown::github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+knitr::opts_chunk$set(message=FALSE, comment="#>")
+devtools::load_all(".")
+library(igraph)
+```
+
+# Omics Network Objects
+
+## Input data
+
+The input for omics network objects is an `igraph` object. It can be undirected, directed, or weighted however the emphasis of these methods are on undirected networks.
+
+```{r}
+data(omics)
+print(omics)
+```
+
+Vertex names must be unique.
+
+```{r}
+head(igraph::V(omics)$name)
+```
+
+Optionally you can annotate the edge and node properties of your input. These can be used to filter nodes, edges, or subset your network in downstream methods.
+
+```{r}
+head(igraph::V(omics)$label)
+head(igraph::E(omics)$cor)
+```
+
+## Initialize objects
+
+To create an omics network object, you can simply pass it your `igraph` object.
+
+```{r}
+n <- omics.network$new(omics)
+n$peek()
+```
+
+Optionally you can provide functions for computing node/edge properties like centrality measures. Rather than annotating your igraph with these measures beforehand, by providing the functions directly, they can be used to update node/edge measures if the graph changes. For example, if you delete edges, remove nodes, or subset your graph, you may want to recompute all of your centrality measures. 
+
+```{r}
+# Really simple
+node.degree <- function(ig) igraph::degree(ig)
+
+# Specific parameters
+node.eigen <- function(ig) igraph::eigen_centrality(ig, directed=FALSE)$vector
+edge.betweenness <- function(ig) igraph::edge_betweenness(ig, directed=FALSE)
+
+# More complicated 
+edge.routes <- function(ig) {
+    paths <- suppressWarnings(shortest_paths(ig, V(ig), V(ig), output="epath")$epath)
+    counts <- mapply(function(p) {
+        igraph::as_ids(p)
+    }, paths, SIMPLIFY=FALSE, USE.NAMES=TRUE) %>%
+    unlist() %>%
+    table()
+    return(unname(replace_nas(counts[as_ids(E(ig))], 0)))    
+}
+
+node.fn <-list("degree"=node.degree, "eigen"=node.eigen)
+edge.fn <- list("betweenness"=edge.betweenness, "routes"=edge.routes)
+
+n <- omics.network$new(omics, node.fn=node.fn, edge.fn=edge.fn)
+n$peek()
+```
+
+## Node and edge attributes
+
+The way to think about node and edge properties is that there is an attributes data frame that has a one-to-one mapping to nodes and edges in the graph. These data frames or attributes tables are not data elements in the object but they are created, manipulated, and destroyed on the fly.
+
+```{r}
+head(n$nodes.attributes())
+head(n$edges.attributes())
+```
+
+The `name` attribute is really important and will always be there. These are unique identifiers that you can use to query the `igraph` object with if necessary.
+
+```{r}
+igraph::shortest_paths(n$ig, from="387", to="109")$vpath
+```
+
+Querying with the node and edge identifiers is not very practical, you usually want to use symbols or other recognizable labels. Don't worry about the next few lines of code, it's just to demonstrate how to use the attribute getter functions to figure out that we just found the shortest path between genes GCR1 and LSM8.
+
+```{r}
+n$nodes("label")[match("387", n$nodes("name"))]
+n$nodes("label")[match("109", n$nodes("name"))]
+```
+
+You can also do edges
+```{r}
+head(n$edges("name"))
+head(n$edges("betweenness"))
+```
+
+You can also add annotations. Note: These will not be updated if the graph is changed becuase the object will not have access to an updating function.  
+
+```{r}
+clutering.coefficients <- igraph::transitivity(omics, type="localundirected")
+clutering.coefficients[is.na(clutering.coefficients)] <- NA
+n$nodes.annotate(clutering.coefficients, "clustering")
+head(n$nodes.attributes())
+```
+
+With the omics network object, you can use other attributes to query which is more practical...
+
+You have complete control over the internal `igraph` plotting function, but the key arguments are explicitly defined and default to values for good looking plots for small-medium sized networks (10-2.5K nodes).
+
+```{r}
+n$plot()
+```
+
+You can also use the attributes in your visualization.
+
+```{r}
+n$plot(vertex.size=n$nodes("degree"))
+```
+
+## Network filtering
+
+The network can be filtered by both node and 7 attributes. Because we're using a data frame mindset, you can filter the same way you would if you were using `dplyr::filter()`.
+
+```{r}
+head(n$nodes.attributes())
+head(n$nodes.filter("degree >= 8"))
+```
+
+Here are all the nodes with at least seven edges. You can return any attribute, as you might want to know, for example, which genes are highly connected or how many highly connected nodes are transcription factors?
+
+```{r}
+n$nodes.filter("degree >= 8", attr="label")
+n$nodes.filter("degree >= 8", attr="is_tf")
+```
+
+What about finding which highly connect genes are also transcription factors together?
+
+```{r}
+n$nodes.filter("degree >= 8 & is_tf", attr="label")
+```
+
+```{r}
+n$edges.filter("cor > 0 & betweenness > 5000", attr="name")
+```
+
+## Network subsetting
+
+You can use filtering methods to subset the network or add/remove nodes and edges. When the network is modified, a clone of the object is modified and returned. Node and edge attributes are updated based on the new graph structure.
+
+```{r}
+head(n$nodes.attributes())
+n.s <- n$graph.delete.nodes(c("MTH1","SNF3"), attr="label")
+head(n.s$nodes.attributes())
+```
+
+There are some useful functions for removing multiple edges or loops.
+
+```{r}
+n.s <- n$graph.simplify(remove.multiple=TRUE, remove.loops=TRUE)
+```
+
+Or deleting disconnected nodes.
+
+```{r}
+n.s <- n$graph.delete.isolates()
+```
+
+Before subsetting nodes, you can query neighbors at various degrees.
+
+```{r}
+n$nodes.neighbors(ids="SLX5", attr="label", neighbors.only=TRUE, degree=1)
+n$nodes.neighbors(ids="SLX5", attr="label", neighbors.only=TRUE, degree=2)
+n$nodes.neighbors(ids="SLX5", attr="label", neighbors.only=TRUE, degree=3)
+```
+
+Or just subset directly.
+
+```{r}
+n.s <- n$graph.subset.nodes("SLX5", attr="label", degree=0)
+n.s$plot(vertex.label=n.s$nodes("label"))
+n.s <- n$graph.subset.nodes("SLX5", attr="label", degree=1)
+n.s$plot(vertex.label=n.s$nodes("label"))
+n.s <- n$graph.subset.nodes("SLX5", attr="label", degree=2)
+n.s$plot(vertex.label=n.s$nodes("label"))
+n.s <- n$graph.subset.nodes("SLX5", attr="label", degree=3)
+n.s$plot(vertex.label=n.s$nodes("label"))
+n.s <- n$graph.subset.nodes("SLX5", attr="label", degree=4)
+n.s$plot(vertex.label=n.s$nodes("label"))
+```
+
+Lets split the graph in half.
+
+```{r}
+# Get the node identifiers
+n.s$nodes.map(c("SLX5", "PRP9"), "label", "name")
+
+# Filter out the edges
+n.s.s <- n.s$edges.filter("name != '122|646' & name != '646|122'") %>%
+         n.s$graph.subset.edges()
+
+# We just dleted the SLX5-PRP9 edge
+n.s.s$plot(vertex.label=n.s.s$nodes("label"))
+```
+
+## Network visualization
+
+We can make the visualizations a bit fancier.
+
+```{r}
+n.s <- n$nodes.filter("degree > 5", attr="label") %>% 
+       n$graph.subset.nodes(attr="label", degree=1)
+
+n.s$plot(vertex.label=n.s$nodes("label"))
+```
+
+```{r}
+n.s$plot(vertex.label=ifelse(n.s$nodes("degree") > 8, n.s$nodes("label"), ""),
+         vertex.size=normalize.range(n.s$nodes("degree"), 5, 15),
+         vertex.color=colorize(n.s$nodes("eigen")),
+         vertex.shape=c("circle", "square")[as.numeric(n.s$nodes("is_tf"))+1],
+         vertex.label.color="black",
+         vertex.label.dist=0,
+         layout=igraph::layout_nicely(n.s$ig),
+         seed=1)
+```
+
+```{r}
+n.s$plot(vertex.size=normalize.range(n.s$nodes("degree"), 5, 15),
+         vertex.color=colorize(n.s$nodes("eigen")),
+         vertex.shape=c("circle", "square")[as.numeric(n.s$nodes("is_tf"))+1],
+         edge.width=normalize.range(abs(n.s$edges("cor")), 1, 15),
+         edge.color=c("red", "green")[as.numeric(n.s$edges("cor") > 0)+1])
+```
